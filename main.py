@@ -12,12 +12,20 @@ from telegram.ext import (
 )
 
 # =============================
-# 봇 토큰 (환경변수에서 로드)
+# 봇 토큰 (환경변수)
 # =============================
 TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
     raise RuntimeError("❌ BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+
+# =============================
+# 공통 HTTP 헤더 (중요)
+# =============================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
+}
 
 # =============================
 # 가격 포맷
@@ -38,6 +46,7 @@ def get_utc0_price(symbol):
     utc_0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if now < utc_0:
         utc_0 -= timedelta(days=1)
+
     start = int(utc_0.timestamp() * 1000)
 
     url = "https://api.bybit.com/v5/market/kline"
@@ -50,16 +59,25 @@ def get_utc0_price(symbol):
     }
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+
+        if r.status_code != 200 or not r.text:
+            raise ValueError("Empty response")
+
         data = r.json()
+
+        if not data.get("result") or not data["result"].get("list"):
+            raise ValueError("Invalid response")
+
         candle = data["result"]["list"][0]
         return float(candle[1])
+
     except Exception as e:
         print(f"[UTC0 ERROR] {symbol} : {e}")
         return None
 
 # =============================
-# 현재 데이터
+# 현재 시세 데이터
 # =============================
 def get_coin_data(coin):
     symbol = coin.upper() + "USDT"
@@ -67,19 +85,28 @@ def get_coin_data(coin):
     params = {"category": "linear", "symbol": symbol}
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+
+        if r.status_code != 200 or not r.text:
+            raise ValueError("Empty response")
+
         data = r.json()
+
+        if not data.get("result") or not data["result"].get("list"):
+            raise ValueError("Invalid response")
+
         info = data["result"]["list"][0]
 
         price = float(info["lastPrice"])
         funding = float(info["fundingRate"]) * 100
-        base = get_utc0_price(symbol)
 
+        base = get_utc0_price(symbol)
         if base is None:
             return None, None, None
 
         percent = ((price - base) / base) * 100
         return price, percent, funding
+
     except Exception as e:
         print(f"[PRICE ERROR] {symbol} : {e}")
         return None, None, None
@@ -97,9 +124,18 @@ def get_4h_candles(symbol, limit=100):
     }
 
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+
+        if r.status_code != 200 or not r.text:
+            raise ValueError("Empty response")
+
         data = r.json()
+
+        if not data.get("result") or not data["result"].get("list"):
+            raise ValueError("Invalid response")
+
         return data["result"]["list"]
+
     except Exception as e:
         print(f"[CANDLE ERROR] {symbol} : {e}")
         return None
@@ -198,10 +234,13 @@ async def dot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(update.effective_chat.id, msg)
 
 # =============================
-# 실행 (서버용 핵심)
+# 실행 (중복 실행 방지)
 # =============================
 if __name__ == "__main__":
     print("🚀 Bybit 시세 + SR 텔레그램 봇 시작")
+
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dot_handler))
-    app.run_polling(close_loop=False)
+
+    # 🚫 다른 인스턴스와 충돌 방지
+    app.run_polling(drop_pending_updates=True)
