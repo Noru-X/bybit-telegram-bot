@@ -204,4 +204,4 @@ if __name__ == "__main__":
     print("🚀 Bybit 시세 + SR 텔레그램 봇 시작")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dot_handler))
-    app.run_polling()
+    app.run_polling(close_loop=False)
