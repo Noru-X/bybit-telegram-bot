@@ -12,20 +12,29 @@ from telegram.ext import (
 )
 
 # =============================
-# 봇 토큰 (환경변수)
+# BOT TOKEN
 # =============================
 TOKEN = os.getenv("BOT_TOKEN")
-
 if not TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN 환경변수가 설정되지 않았습니다.")
+    raise RuntimeError("BOT_TOKEN not set")
 
 # =============================
-# 공통 HTTP 헤더 (중요)
+# HTTP 설정 (Railway 안정화)
 # =============================
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json"
 }
+
+def safe_get(url, params):
+    for _ in range(2):  # 최대 2번 시도
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            if r.status_code == 200 and r.text:
+                return r
+        except:
+            pass
+    return None
 
 # =============================
 # 가격 포맷
@@ -39,7 +48,7 @@ def format_price(price):
         return f"{price:,.6f}"
 
 # =============================
-# UTC 00:00 가격
+# UTC 00:00 기준가
 # =============================
 def get_utc0_price(symbol):
     now = datetime.now(timezone.utc)
@@ -58,58 +67,44 @@ def get_utc0_price(symbol):
         "limit": 1
     }
 
-    try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
-
-        if r.status_code != 200 or not r.text:
-            raise ValueError("Empty response")
-
-        data = r.json()
-
-        if not data.get("result") or not data["result"].get("list"):
-            raise ValueError("Invalid response")
-
-        candle = data["result"]["list"][0]
-        return float(candle[1])
-
-    except Exception as e:
-        print(f"[UTC0 ERROR] {symbol} : {e}")
+    r = safe_get(url, params)
+    if not r:
         return None
 
+    data = r.json()
+    if not data.get("result") or not data["result"].get("list"):
+        return None
+
+    return float(data["result"]["list"][0][1])
+
 # =============================
-# 현재 시세 데이터
+# 현재 시세
 # =============================
 def get_coin_data(coin):
     symbol = coin.upper() + "USDT"
     url = "https://api.bybit.com/v5/market/tickers"
     params = {"category": "linear", "symbol": symbol}
 
-    try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
-
-        if r.status_code != 200 or not r.text:
-            raise ValueError("Empty response")
-
-        data = r.json()
-
-        if not data.get("result") or not data["result"].get("list"):
-            raise ValueError("Invalid response")
-
-        info = data["result"]["list"][0]
-
-        price = float(info["lastPrice"])
-        funding = float(info["fundingRate"]) * 100
-
-        base = get_utc0_price(symbol)
-        if base is None:
-            return None, None, None
-
-        percent = ((price - base) / base) * 100
-        return price, percent, funding
-
-    except Exception as e:
-        print(f"[PRICE ERROR] {symbol} : {e}")
+    r = safe_get(url, params)
+    if not r:
+        print(f"[PRICE ERROR] {symbol} : Empty response")
         return None, None, None
+
+    data = r.json()
+    if not data.get("result") or not data["result"].get("list"):
+        print(f"[PRICE ERROR] {symbol} : Invalid response")
+        return None, None, None
+
+    info = data["result"]["list"][0]
+    price = float(info["lastPrice"])
+    funding = float(info["fundingRate"]) * 100
+
+    base = get_utc0_price(symbol)
+    if base is None:
+        return None, None, None
+
+    percent = ((price - base) / base) * 100
+    return price, percent, funding
 
 # =============================
 # 4H 캔들
@@ -123,25 +118,18 @@ def get_4h_candles(symbol, limit=100):
         "limit": limit
     }
 
-    try:
-        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
-
-        if r.status_code != 200 or not r.text:
-            raise ValueError("Empty response")
-
-        data = r.json()
-
-        if not data.get("result") or not data["result"].get("list"):
-            raise ValueError("Invalid response")
-
-        return data["result"]["list"]
-
-    except Exception as e:
-        print(f"[CANDLE ERROR] {symbol} : {e}")
+    r = safe_get(url, params)
+    if not r:
         return None
 
+    data = r.json()
+    if not data.get("result") or not data["result"].get("list"):
+        return None
+
+    return data["result"]["list"]
+
 # =============================
-# 지지 / 저항 계산
+# 지지 / 저항
 # =============================
 def calc_sr(candles, current):
     cluster = defaultdict(float)
@@ -158,7 +146,6 @@ def calc_sr(candles, current):
     levels = sorted(cluster.items(), key=lambda x: x[1], reverse=True)
 
     supports, resistances = [], []
-
     for price, _ in levels:
         if price < current:
             if all(abs(price - s) > step for s in supports):
@@ -166,7 +153,6 @@ def calc_sr(candles, current):
         else:
             if all(abs(price - r) > step for r in resistances):
                 resistances.append(price)
-
         if len(supports) >= 3 and len(resistances) >= 3:
             break
 
@@ -188,16 +174,11 @@ async def dot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         coin = parts[1]
-        symbol = coin.upper() + "USDT"
-
-        candles = get_4h_candles(symbol)
+        candles = get_4h_candles(coin.upper() + "USDT")
         price, _, _ = get_coin_data(coin)
 
         if not candles or price is None:
-            await context.bot.send_message(
-                update.effective_chat.id,
-                "❌ 데이터를 불러오지 못했습니다."
-            )
+            await context.bot.send_message(update.effective_chat.id, "❌ 데이터 오류")
             return
 
         sup, res = calc_sr(candles, price)
@@ -212,12 +193,11 @@ async def dot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # .btc
-    if not text.startswith(".") or len(text) <= 1:
+    if not text.startswith("."):
         return
 
     coin = text[1:]
     price, percent, funding = get_coin_data(coin)
-
     if price is None:
         return
 
@@ -234,13 +214,10 @@ async def dot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(update.effective_chat.id, msg)
 
 # =============================
-# 실행 (중복 실행 방지)
+# 실행
 # =============================
 if __name__ == "__main__":
     print("🚀 Bybit 시세 + SR 텔레그램 봇 시작")
-
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, dot_handler))
-
-    # 🚫 다른 인스턴스와 충돌 방지
     app.run_polling(drop_pending_updates=True)
